@@ -2,7 +2,21 @@
 
 import { useState, useRef } from 'react';
 import { motion, useInView } from 'framer-motion';
-import { Mail, Phone, MapPin, Send, Github, Linkedin, Copy, Check, ExternalLink } from 'lucide-react';
+import {
+  Mail,
+  Phone,
+  MapPin,
+  Send,
+  Github,
+  Linkedin,
+  Copy,
+  Check,
+  ExternalLink,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+} from 'lucide-react';
+import emailjs from '@emailjs/browser';
 import { siteConfig } from '@/config/site';
 
 export default function Contact() {
@@ -10,14 +24,18 @@ export default function Contact() {
   const isInView = useInView(ref, { once: true, margin: '-100px' });
   const [formData, setFormData] = useState({ name: '', email: '', subject: '', message: '' });
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
   const [copied, setCopied] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name.trim()) newErrors.name = 'Name is required';
-    if (!formData.email.trim()) newErrors.email = 'Email is required';
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) newErrors.email = 'Invalid email format';
+    if (!formData.email.trim()) {
+      newErrors.email = 'Email is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+      newErrors.email = 'Invalid email format';
+    }
     if (!formData.subject.trim()) newErrors.subject = 'Subject is required';
     if (!formData.message.trim()) newErrors.message = 'Message is required';
     setErrors(newErrors);
@@ -26,42 +44,95 @@ export default function Contact() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (status === 'loading') return;
+
     if (!validateForm()) return;
 
     setStatus('loading');
+    setErrorMessage('');
 
-    // Check if EmailJS is configured
-    if (siteConfig.emailjs.serviceId && siteConfig.emailjs.templateId && siteConfig.emailjs.publicKey) {
-      try {
-        const emailjs = await import('@emailjs/browser');
-        await emailjs.send(
-          siteConfig.emailjs.serviceId,
-          siteConfig.emailjs.templateId,
-          {
-            from_name: formData.name,
-            from_email: formData.email,
-            subject: formData.subject,
-            message: formData.message,
-            to_email: siteConfig.email,
-          },
-          siteConfig.emailjs.publicKey
-        );
-        setStatus('success');
-        setFormData({ name: '', email: '', subject: '', message: '' });
-        setTimeout(() => setStatus('idle'), 5000);
-      } catch {
-        setStatus('error');
-        setTimeout(() => setStatus('idle'), 5000);
-      }
-    } else {
-      // Fallback to mailto
-      const mailtoUrl = `mailto:${siteConfig.email}?subject=${encodeURIComponent(formData.subject)}&body=${encodeURIComponent(
-        `From: ${formData.name} (${formData.email})\n\n${formData.message}`
-      )}`;
-      window.open(mailtoUrl, '_blank');
+    const serviceId = process.env.NEXT_PUBLIC_EMAILJS_SERVICE_ID || siteConfig.emailjs.serviceId;
+    const templateId = process.env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID || siteConfig.emailjs.templateId;
+    const publicKey = process.env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY || siteConfig.emailjs.publicKey;
+
+    if (!serviceId || !templateId || !publicKey) {
+      console.warn('EmailJS environment variables are missing.');
+      setStatus('error');
+      setErrorMessage('Email service configuration missing. Please verify environment settings.');
+      return;
+    }
+
+    try {
+      const trimmedName = formData.name.trim();
+      const trimmedEmail = formData.email.trim();
+      const trimmedSubject = formData.subject.trim();
+      const trimmedMessage = formData.message.trim();
+
+      // Format message so that Subject is guaranteed to appear in the email body even if the EmailJS template only uses {{name}}, {{email}}, {{message}}
+      const formattedMessage = trimmedSubject
+        ? `[Subject: ${trimmedSubject}]\n\n${trimmedMessage}`
+        : trimmedMessage;
+
+      const templateParams: Record<string, string> = {
+        name: trimmedName,
+        email: trimmedEmail,
+        message: formattedMessage,
+        subject: trimmedSubject,
+        from_name: trimmedName,
+        from_email: trimmedEmail,
+        reply_to: trimmedEmail,
+      };
+
+      // Pre-initialize and send using EmailJS credentials
+      emailjs.init({ publicKey });
+      const response = await emailjs.send(serviceId, templateId, templateParams, publicKey);
+
+      console.log('EmailJS Success Response:', response);
       setStatus('success');
       setFormData({ name: '', email: '', subject: '', message: '' });
-      setTimeout(() => setStatus('idle'), 5000);
+      setErrors({});
+
+      setTimeout(() => {
+        setStatus((current) => (current === 'success' ? 'idle' : current));
+      }, 6000);
+    } catch (err: unknown) {
+      console.error('EmailJS Submission Error:', err);
+      setStatus('error');
+
+      let errorText = '';
+      let errorStatus: number | null = null;
+
+      if (err && typeof err === 'object') {
+        if ('status' in err && typeof (err as { status: unknown }).status === 'number') {
+          errorStatus = (err as { status: number }).status;
+        }
+        if ('text' in err && typeof (err as { text: unknown }).text === 'string') {
+          errorText = (err as { text: string }).text;
+        } else if ('message' in err && typeof (err as { message: unknown }).message === 'string') {
+          errorText = (err as { message: string }).message;
+        }
+      } else if (typeof err === 'string') {
+        errorText = err;
+      }
+
+      if (!errorText && !errorStatus) {
+        errorText = 'An unexpected error occurred while communicating with EmailJS.';
+      }
+
+      const statusPrefix = errorStatus ? `[Status ${errorStatus}] ` : '';
+
+      // Specific diagnostic for Gmail API OAuth session expiration
+      if (
+        errorText.toLowerCase().includes('gmail_api') ||
+        errorText.toLowerCase().includes('sessional location') ||
+        errorStatus === 412
+      ) {
+        setErrorMessage(
+          `${statusPrefix}${errorText} — The connected Gmail account in your EmailJS dashboard requires re-authentication. Please log into dashboard.emailjs.com > 'Email Services' > click 'service_lgrzfis' > Reconnect Account and ensure the 'Send email on your behalf' permission is checked.`
+        );
+      } else {
+        setErrorMessage(`${statusPrefix}${errorText}`);
+      }
     }
   };
 
@@ -210,6 +281,8 @@ export default function Contact() {
                   <label className="block text-xs font-mono text-text-muted mb-2 tracking-wider">NAME</label>
                   <input
                     type="text"
+                    name="name"
+                    disabled={status === 'loading'}
                     value={formData.name}
                     onChange={(e) => {
                       setFormData({ ...formData, name: e.target.value });
@@ -217,7 +290,7 @@ export default function Contact() {
                     }}
                     className={`w-full px-4 py-3 rounded-lg bg-white/5 border ${
                       errors.name ? 'border-red-500/50' : 'border-white/10'
-                    } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50`}
+                    } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50 disabled:opacity-60 disabled:cursor-not-allowed`}
                     placeholder="Your name"
                   />
                   {errors.name && <p className="text-red-400 text-xs mt-1">{errors.name}</p>}
@@ -226,6 +299,8 @@ export default function Contact() {
                   <label className="block text-xs font-mono text-text-muted mb-2 tracking-wider">EMAIL</label>
                   <input
                     type="email"
+                    name="email"
+                    disabled={status === 'loading'}
                     value={formData.email}
                     onChange={(e) => {
                       setFormData({ ...formData, email: e.target.value });
@@ -233,7 +308,7 @@ export default function Contact() {
                     }}
                     className={`w-full px-4 py-3 rounded-lg bg-white/5 border ${
                       errors.email ? 'border-red-500/50' : 'border-white/10'
-                    } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50`}
+                    } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50 disabled:opacity-60 disabled:cursor-not-allowed`}
                     placeholder="your@email.com"
                   />
                   {errors.email && <p className="text-red-400 text-xs mt-1">{errors.email}</p>}
@@ -243,6 +318,8 @@ export default function Contact() {
                 <label className="block text-xs font-mono text-text-muted mb-2 tracking-wider">SUBJECT</label>
                 <input
                   type="text"
+                  name="subject"
+                  disabled={status === 'loading'}
                   value={formData.subject}
                   onChange={(e) => {
                     setFormData({ ...formData, subject: e.target.value });
@@ -250,7 +327,7 @@ export default function Contact() {
                   }}
                   className={`w-full px-4 py-3 rounded-lg bg-white/5 border ${
                     errors.subject ? 'border-red-500/50' : 'border-white/10'
-                  } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50`}
+                  } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors placeholder:text-text-muted/50 disabled:opacity-60 disabled:cursor-not-allowed`}
                   placeholder="Subject"
                 />
                 {errors.subject && <p className="text-red-400 text-xs mt-1">{errors.subject}</p>}
@@ -258,6 +335,8 @@ export default function Contact() {
               <div>
                 <label className="block text-xs font-mono text-text-muted mb-2 tracking-wider">MESSAGE</label>
                 <textarea
+                  name="message"
+                  disabled={status === 'loading'}
                   value={formData.message}
                   onChange={(e) => {
                     setFormData({ ...formData, message: e.target.value });
@@ -266,7 +345,7 @@ export default function Contact() {
                   rows={5}
                   className={`w-full px-4 py-3 rounded-lg bg-white/5 border ${
                     errors.message ? 'border-red-500/50' : 'border-white/10'
-                  } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors resize-none placeholder:text-text-muted/50`}
+                  } text-white text-sm focus:outline-none focus:border-accent-cyan/50 transition-colors resize-none placeholder:text-text-muted/50 disabled:opacity-60 disabled:cursor-not-allowed`}
                   placeholder="Your message..."
                 />
                 {errors.message && <p className="text-red-400 text-xs mt-1">{errors.message}</p>}
@@ -275,40 +354,60 @@ export default function Contact() {
               <button
                 type="submit"
                 disabled={status === 'loading'}
-                className="w-full flex items-center justify-center gap-3 px-6 py-4 rounded-lg bg-gradient-to-r from-accent-cyan to-accent-blue text-bg-primary font-display text-sm tracking-wider font-bold hover:shadow-lg hover:shadow-accent-cyan/25 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02]"
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 rounded-lg bg-gradient-to-r from-accent-cyan to-accent-blue text-bg-primary font-display text-sm tracking-wider font-bold hover:shadow-lg hover:shadow-accent-cyan/25 transition-all duration-300 disabled:opacity-60 disabled:cursor-not-allowed hover:scale-[1.01]"
               >
                 {status === 'loading' ? (
                   <>
-                    <div className="w-4 h-4 border-2 border-bg-primary/30 border-t-bg-primary rounded-full animate-spin" />
-                    SENDING...
+                    <Loader2 size={18} className="animate-spin text-bg-primary" />
+                    <span>TRANSMITTING MESSAGE...</span>
                   </>
                 ) : status === 'success' ? (
                   <>
-                    <Check size={16} />
-                    MESSAGE SENT!
+                    <CheckCircle2 size={18} />
+                    <span>MESSAGE TRANSMITTED!</span>
                   </>
                 ) : (
                   <>
-                    <Send size={16} />
-                    SEND MESSAGE
+                    <Send size={18} />
+                    <span>SEND MESSAGE</span>
                   </>
                 )}
               </button>
 
-              {status === 'error' && (
-                <p className="text-red-400 text-sm text-center">
-                  Failed to send message. Please try{' '}
-                  <a href={`mailto:${siteConfig.email}`} className="text-accent-cyan underline">
-                    emailing directly
-                  </a>
-                  .
-                </p>
+              {status === 'success' && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 rounded-xl bg-accent-cyan/10 border border-accent-cyan/40 text-accent-cyan text-sm flex items-start gap-3 shadow-[0_0_20px_rgba(0,240,255,0.15)]"
+                >
+                  <CheckCircle2 size={20} className="text-accent-cyan shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-mono text-xs font-bold tracking-wider text-accent-cyan">// TRANSMISSION DELIVERED</p>
+                    <p className="text-xs text-white/90 mt-1 leading-relaxed">
+                      Thank you! Your message has been sent successfully via EmailJS. I will get back to you shortly.
+                    </p>
+                  </div>
+                </motion.div>
               )}
 
-              {!siteConfig.emailjs.serviceId && (
-                <p className="text-text-muted text-xs text-center">
-                  Form will open your default email client as a fallback.
-                </p>
+              {status === 'error' && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 text-red-400 text-sm flex items-start gap-3 shadow-[0_0_20px_rgba(239,68,68,0.15)]"
+                >
+                  <AlertCircle size={20} className="text-red-400 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-mono text-xs font-bold tracking-wider text-red-400">// TRANSMISSION FAILED</p>
+                    <p className="text-xs text-white/90 mt-1 leading-relaxed">
+                      {errorMessage || 'Failed to dispatch message.'} Please try again or reach out directly at{' '}
+                      <a href={`mailto:${siteConfig.email}`} className="text-accent-cyan underline hover:text-white transition-colors">
+                        {siteConfig.email}
+                      </a>
+                      .
+                    </p>
+                  </div>
+                </motion.div>
               )}
             </form>
           </motion.div>
